@@ -13,55 +13,63 @@ X_ul = np.column_stack([x1_u, x2_u])
 # ---------- STANDARDIZE ----------
 X_all = np.vstack([X_det, X_ul])
 x_mean = X_all.mean(axis=0)
-x_std  = X_all.std(axis=0)
+x_std = X_all.std(axis=0)
 
 X_det_s = (X_det - x_mean) / x_std
-X_ul_s  = (X_ul  - x_mean) / x_std
+X_ul_s = (X_ul - x_mean) / x_std
 
-y_mean = np.mean(y_det)        # calculated the mean value and std of y 
-y_std  = np.std(y_det)
+y_mean = np.mean(y_det)
+y_std = np.std(y_det)
 y_det_s = (y_det - y_mean) / y_std
-y_ul_s  = (y_ul - y_mean) / y_std
+y_ul_s = (y_ul_arr - y_mean) / y_std
 
 # upper limits scale：<1 close to upper limits >1 reduce the influence of upper limits
-yerr_ul_scale = 0.5
+yerr_ul_scale = 1
 
 yerr_ul = yerr_ul_scale * np.median(yerr_det) * np.ones_like(y_ul_s)
 
 yerr_det_s = yerr_det / y_std
-yerr_ul_s  = yerr_ul / y_std
+yerr_ul_s = yerr_ul / y_std
 
-# ---------- MODEL: detections + latent truncated values for upper limits ----------
 with pm.Model() as model:
-    # prior
-    m1 = pm.Normal("m1", mu=0, sigma=5)
-    m2 = pm.Normal("m2", mu=0, sigma=5)
-    b  = pm.Normal("b", mu=8, sigma=10)
+    # 收紧 prior
+    m1 = pm.TruncatedNormal("m1", mu=0, sigma=3, lower=-4, upper=1)
+    m2 = pm.TruncatedNormal("m2", mu=0, sigma=3, lower=-4, upper=1)
+    b  = pm.Normal("b", mu=5, sigma=10)  # 放宽 b 的 prior，增加灵活性
 
-    # Different intrinsic scatter for detection / upper-limit
-    sigma_int_det = pm.HalfNormal("sigma_int_det", sigma=1.0)
-    sigma_int_ul  = pm.HalfNormal("sigma_int_ul",  sigma=0.5)
+    # 内禀误差
+    sigma_int = pm.HalfNormal("sigma_int", sigma=2)  # 增大内禀误差的 prior
 
-    # DETECTION likelihood
-    mu_det = m1 * X_det_s[:, 0] + m2 * X_det_s[:, 1] + b 
-    sigma_det = pm.math.sqrt(sigma_int_det**2 + yerr_det_s**2) 
-    nu_det = pm.Exponential("nu_det", 1/30.0) 
-    pm.StudentT("y_det", mu=mu_det, sigma=sigma_det, nu=nu_det, observed=y_det_s) 
-    
-    # UPPER-LIMITS: y_ul_latent <= observed upper limit 
-    mu_ul = m1 * X_ul_s[:, 0] + m2 * X_ul_s[:, 1] + b 
-    sigma_ul_vec = pm.math.sqrt(sigma_int_ul**2 + yerr_ul_s**2) 
-    
-    # TruncatedNormal: lower=-inf, upper = observed upper limit (in standardized y) 
-    y_ul_latent = pm.TruncatedNormal( "y_ul_latent", mu=mu_ul, sigma=sigma_ul_vec, lower=-np.inf, upper=y_ul_s, shape=len(y_ul_s) ) 
+    # -------------------
+    # 探测点 likelihood (StudentT)
+    mu_det = m1 * X_det_s[:, 0] + m2 * X_det_s[:, 1] + b
+    sigma_det = pmm.sqrt(sigma_int**2 + yerr_det_s**2)
+    pm.StudentT("y_det", nu=4, mu=mu_det, sigma=sigma_det, observed=y_det_s)
 
-    # Sampling
+    # -------------------
+    # 上限点 likelihood (Censored)
+    mu_ul_vec = m1 * X_ul_s[:, 0] + m2 * X_ul_s[:, 1] + b
+    sigma_ul_vec = pmm.sqrt(sigma_int**2 + yerr_ul_s**2)
+
+    pm.Censored(
+        "y_ul_obs",
+        pm.Normal.dist(mu=mu_ul_vec, sigma=sigma_ul_vec),
+        lower=-np.inf,
+        upper=y_ul_s,
+        observed=y_ul_s
+    )
+
+    # -------------------
+    # MAP 初始化
+    start = pm.find_MAP()
+
+    # MCMC 采样
     idata = pm.sample(
-        draws=1200,
-        tune=300,
+        draws=1000,
+        tune=500,
         chains=4,
-        target_accept=0.9,
-        init="adapt_diag",
+        target_accept=0.95,
+        start=start,
         random_seed=42,
         progressbar=True
     )
